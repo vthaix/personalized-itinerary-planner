@@ -1,0 +1,18 @@
+{
+ "step": "survey_export",
+ "outputs": [
+  "data/survey/tier1_nhatrang.csv",
+  "data/survey/tier1_nhatrang.flagged.csv"
+ ],
+ "stats": {
+  "rows": 196,
+  "suggested": 18,
+  "flagged": 10,
+  "stale": 0,
+  "rows_with_manual_data_preserved": 0
+ },
+ "finished_at": "2026-11-21T07:55:05+00:00",
+ "input": "data/processed/places_nhatrang.jsonl",
+ "group": "tham_quan",
+ "suggest_threshold": 6
+}

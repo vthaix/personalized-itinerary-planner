@@ -1,0 +1,62 @@
+-- Bảng địa điểm chuẩn (thiết kế mục 9). Toạ độ theo quy ước ADR 0004:
+-- tạo điểm bằng ST_SRID(POINT(lon, lat), 4326); cột lat/lon lưu riêng để đọc trực tiếp.
+CREATE TABLE IF NOT EXISTS place (
+  place_id          VARCHAR(32)   NOT NULL PRIMARY KEY,   -- osm:n123 / osm:w123 / osm:r123
+  source            VARCHAR(16)   NOT NULL,
+  osm_type          VARCHAR(8)    NULL,
+  osm_id            BIGINT        NULL,
+  name              VARCHAR(255)  NOT NULL,
+  name_en           VARCHAR(255)  NULL,
+  name_norm         VARCHAR(255)  NOT NULL,
+  category          VARCHAR(32)   NOT NULL,
+  category_group    VARCHAR(16)   NOT NULL,
+  lat               DOUBLE        NOT NULL,
+  lon               DOUBLE        NOT NULL,
+  location          POINT         NOT NULL SRID 4326,
+  address           VARCHAR(512)  NULL,
+  opening_hours_raw VARCHAR(512)  NULL,
+  website           VARCHAR(512)  NULL,
+  phone             VARCHAR(128)  NULL,
+  wikidata          VARCHAR(32)   NULL,
+  wikipedia         VARCHAR(255)  NULL,
+  wikimedia_commons VARCHAR(512)  NULL,
+  osm_tags          JSON          NULL,
+  merged_from       JSON          NULL,
+  license           VARCHAR(128)  NULL,
+  fetched_at        DATETIME      NULL,
+  osm_base          DATETIME      NULL,
+  is_active         TINYINT(1)    NOT NULL DEFAULT 1,
+  last_seen_run     VARCHAR(64)   NOT NULL,
+  created_at        TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at        TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  SPATIAL INDEX sp_location (location),
+  INDEX ix_category (category_group, category),
+  INDEX ix_name_norm (name_norm),
+  INDEX ix_osm (osm_type, osm_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Dữ liệu khảo sát tay tầng 1 (nạp từ CSV bởi bước survey_import). CSV là nguồn chuẩn.
+CREATE TABLE IF NOT EXISTS place_survey (
+  place_id             VARCHAR(32)   NOT NULL PRIMARY KEY,
+  include              TINYINT(1)    NOT NULL,
+  category_override    VARCHAR(32)   NULL,
+  opening_hours        VARCHAR(255)  NULL,
+  price_adult_vnd      INT UNSIGNED  NULL,
+  price_child_vnd      INT UNSIGNED  NULL,
+  price_note           VARCHAR(512)  NULL,
+  typical_duration_min SMALLINT UNSIGNED NULL,
+  intensity            TINYINT UNSIGNED  NULL,
+  kid_friendly         TINYINT(1)    NULL,
+  elderly_friendly     TINYINT(1)    NULL,
+  indoor               TINYINT(1)    NULL,
+  best_time            VARCHAR(128)  NULL,
+  description_vi       TEXT          NULL,
+  source_url           VARCHAR(1024) NULL,
+  source_note          VARCHAR(512)  NULL,
+  surveyed_at          DATE          NULL,
+  surveyor             VARCHAR(128)  NULL,
+  notes                TEXT          NULL,
+  updated_at           TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_survey_place FOREIGN KEY (place_id) REFERENCES place (place_id),
+  CONSTRAINT ck_intensity CHECK (intensity IS NULL OR intensity BETWEEN 1 AND 3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

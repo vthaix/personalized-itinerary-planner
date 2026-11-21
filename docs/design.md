@@ -42,6 +42,8 @@ Người dùng mô tả chuyến đi bằng **văn bản hoặc giọng nói** (
 | Ngày 2 | Nhiều hoạt động, tham quan + ẩm thực |
 | Ngày 3 | Trải nghiệm đặc biệt; chú ý giờ về |
 
+**Đầu ra cho người dùng:** bản đồ hiển thị các địa điểm theo từng ngày và tuyến đường gợi ý (OSRM trên mạng đường OSM); bên dưới là thẻ từng địa điểm gồm mô tả, giờ mở cửa, giá vé (kèm trạng thái đã xác minh hay chưa), lý do được chọn, đánh giá và ảnh do người dùng gửi (mục 9.2).
+
 **Mục tiêu nghiên cứu**
 
 1. Thu thập, làm sạch, chuẩn hóa và tổ chức dữ liệu du lịch.
@@ -108,7 +110,9 @@ Người dùng mô tả chuyến đi bằng **văn bản hoặc giọng nói** (
 | Backend | Python + FastAPI | Core | REST API, WebSocket/SSE trả tiến trình |
 | Frontend | React / Next.js + bản đồ (Leaflet/MapLibre) | Core | Nhập văn bản/ghi âm, hiển thị lịch trình và bản đồ |
 | Cache / hàng đợi | Redis | Tùy chọn | Lưu đệm kết quả Claude, hàng đợi tác vụ STT. Bản Core không cần Redis: STT chạy nền bằng FastAPI background task, checkpoint LangGraph lưu bằng SQLite hoặc MySQL (chọn ở GĐ 4, mục 6.5) |
-| Lưu trữ thô | MinIO | Tùy chọn | Dữ liệu gốc, âm thanh (nếu được đồng ý) |
+| Lưu trữ đối tượng | MinIO (API tương thích S3) | Core | Ảnh người dùng tải lên (mục 9.2); dữ liệu gốc, âm thanh (nếu được đồng ý) |
+| Xử lý ảnh | Pillow | Core | Nén, tạo thumbnail, xoá metadata EXIF/GPS trước khi lưu |
+| Xác thực | Đăng nhập email/OAuth + JWT (FastAPI) | Core | Định danh người viết đánh giá, chống spam |
 | Pipeline dữ liệu | Makefile + script Python idempotent (Core) / Apache Airflow (Advanced) | Core / Advanced | Thu thập, làm sạch, nạp DB, embedding. Airflow chỉ bọc các bước này thành DAG khi cần cập nhật định kỳ/nhiều thành phố (mục 8.1) |
 | Giám sát | Prometheus + Grafana | Advanced | Tiến trình, lỗi, hiệu năng, token |
 | Đóng gói | Docker Compose | Core | Chạy MySQL, OSRM, backend, frontend cùng lúc |
@@ -439,6 +443,30 @@ def search(category: str, near_lat: float, near_lon: float,
 ### 8.1. Điều phối pipeline dữ liệu
 
 - **Core:** mỗi bước là một hàm/script idempotent trong `pipelines/`, chạy bằng `make fetch clean load embed gazetteer`. Dữ liệu một thành phố gần như tĩnh nên không cần bộ lập lịch.
+- **Hợp đồng của một bước** (để Airflow hoặc script khác gọi riêng từng bước):
+  - Là hàm Python `run(...) -> StepResult` trong package `itinerary_pipelines`, tham số tường minh (đường dẫn vào/ra, cấu hình), không đọc trạng thái ẩn ngoài biến môi trường đã khai báo.
+  - Đầu vào/đầu ra là **file** (JSON/JSONL trong `data/`) hoặc **MySQL**; mỗi file đầu ra có file `*.meta.json` đi kèm ghi bước, thời điểm, số lượng, nguồn, giấy phép.
+  - **Idempotent:** chạy lại cùng đầu vào cho cùng kết quả; nạp DB bằng upsert theo khoá ổn định (`place_id = osm:<n|w|r><id>`).
+  - Mỗi bước có lệnh CLI tương ứng: `python -m itinerary_pipelines <bước>`; Airflow dùng `PythonOperator` gọi hàm hoặc `BashOperator` gọi CLI.
+
+- **Một luồng duy nhất:** các bước và phụ thuộc khai báo một lần trong `itinerary_pipelines/flow.py` (`STEPS`). CLI, Makefile và DAG Airflow sau này đều sinh từ danh sách này. Đường dẫn file do `PipelineConfig` (theo thành phố) quyết định.
+
+```
+fetch ─┬─ coverage
+       └─ clean ─┬─ load ───────────┐
+                 └─ survey_export ──┴─ survey_import   (người khảo sát điền CSV ở giữa)
+```
+
+| Bước | Hàm | Vào | Ra |
+|---|---|---|---|
+| `fetch` | `osm.fetch.run` | Overpass API | `data/raw/osm_<city>.json` |
+| `coverage` | `osm.coverage.run` | file thô | báo cáo mức phủ thẻ |
+| `clean` | `clean.run` | file thô | `data/processed/places_<city>.jsonl` + báo cáo gộp/loại/cần duyệt |
+| `load` | `load.mysql.run` | `places_<city>.jsonl` | bảng `place` (upsert, đánh dấu bản ghi không còn trong nguồn là `is_active = 0`) |
+| `survey_export` | `survey.export.run` | `places_<city>.jsonl` + báo cáo clean | `data/survey/tier1_<city>.csv` (giữ nguyên cột đã điền khi chạy lại) + `*.flagged.csv` nghi gắn thẻ sai |
+| `survey_import` | `survey.ingest.run` | CSV đã điền | bảng `place_survey` (kiểm tra hợp lệ; giờ/giá bắt buộc có nguồn và ngày khảo sát) |
+
+`survey_import` là bước có người tham gia: chạy khi chưa ai điền thì không nạp gì. `data/survey/` chứa công sức nhập tay nên được commit vào git, khác `data/raw/` và `data/processed/` (tạo lại được).
 - **Advanced:** Apache Airflow bọc đúng các hàm đó thành DAG (không viết lại logic):
 
 ```
@@ -490,7 +518,8 @@ Airflow chỉ dùng cho luồng chuẩn bị dữ liệu, **không** cho luồng
 | Neo4j | Quan hệ địa điểm – khu vực – hoạt động | Advanced |
 | Qdrant | Vector khi quét brute-force không còn đủ nhanh | Advanced |
 | Redis | Cache kết quả Claude, hàng đợi STT, checkpoint LangGraph | Tùy chọn |
-| MinIO | Dữ liệu thô, âm thanh được đồng ý lưu | Tùy chọn |
+| MySQL (bảng `app_user`, `review`, `review_photo`) | Tài khoản, đánh giá, metadata ảnh (mục 9.2) | Core |
+| MinIO | Ảnh người dùng (bản gốc đã xoá EXIF + thumbnail); dữ liệu thô, âm thanh được đồng ý lưu | Core |
 
 ### 9.1. Nguồn từng thuộc tính
 
@@ -502,11 +531,64 @@ OSM gần như không có mô tả, giá, giờ mở cửa đầy đủ hay cư�
 | Mô tả (cho embedding) | Wikipedia/Wikivoyage tiếng Việt (CC BY-SA) cho điểm nổi tiếng; **mô tả tự viết** cho phần còn lại (có thể nhờ Claude tóm tắt từ thẻ OSM + ghi chú khảo sát, người kiểm duyệt lại) | Mô tả sinh bằng LLM đánh dấu `source = llm_summary`, không dùng làm bằng chứng trong giải thích |
 | Giờ mở cửa, giá vé | Thẻ OSM nếu có, bổ sung bằng khảo sát tay (website chính thức, hỏi trực tiếp) | Chỉ 100–200 điểm trọng điểm; còn lại `unverified` |
 | `intensity`, `typical_duration_min`, `kid_friendly`… | Gán tay theo thang định nghĩa ở mục 6.2 cho điểm đã khảo sát; điểm còn lại suy từ loại (rule) và đánh dấu `inferred` | Lưu `confidence` để Preference Engine giảm trọng số dữ liệu suy ra |
-| Đánh giá/xếp hạng sao | Không dùng dữ liệu bị cấm lưu trữ theo điều khoản bên thứ ba (ví dụ API bản đồ thương mại); chỉ dùng nguồn có giấy phép cho phép hoặc khảo sát tự thu thập | Kiểm tra giấy phép trước khi nạp |
+| Đánh giá/xếp hạng sao, ảnh | **Do người dùng của hệ thống tự gửi** theo trải nghiệm thực tế (mục 9.2). Không lấy đánh giá/ảnh từ Google Maps, TripAdvisor, Foody… vì điều khoản cấm thu thập và lưu trữ | Ảnh minh hoạ ban đầu cho điểm nổi tiếng có thể lấy từ Wikimedia Commons (giấy phép mở, ghi tác giả) |
 
 Mỗi thuộc tính thuộc nhóm trên có thêm cột `<attr>_source` và `<attr>_status` ∈ {`verified`, `inferred`, `unverified`}.
 
 Quy tắc: MySQL là nguồn chuẩn; các hệ khác là bản biến đổi tạo lại được. Mỗi bản ghi lưu nguồn, mã gốc, thời điểm thu thập, giấy phép. Thuộc tính thiếu đánh dấu “chưa xác minh”. OSM theo ODbL, phải ghi nguồn.
+
+### 9.2. Đánh giá và ảnh của người dùng
+
+Đánh giá sao và ảnh **chỉ** đến từ người dùng của hệ thống, theo trải nghiệm thực tế. Đây là dữ liệu tự thu thập nên không vướng điều khoản bên thứ ba, đồng thời là nguồn số liệu cho khảo sát người dùng (mục 10).
+
+**Luồng**
+
+1. Người dùng đăng nhập → mở thẻ địa điểm (từ lịch trình hoặc bản đồ).
+2. Chấm 1–5 sao, viết nhận xét (tuỳ chọn), chọn ngày đi, nhóm đi cùng (gia đình/cặp đôi/bạn bè/một mình), tải tối đa 5 ảnh.
+3. Backend kiểm tra ảnh (định dạng, kích thước), **xoá EXIF/GPS**, nén, tạo thumbnail, lưu MinIO; lưu đánh giá vào MySQL với trạng thái `published`.
+4. Người khác có thể báo cáo nội dung; quá ngưỡng báo cáo hoặc admin ẩn → `hidden`.
+
+**Lược đồ**
+
+```sql
+app_user(user_id PK, email UNIQUE, display_name, role ENUM('user','admin'),
+         created_at)
+review(review_id PK, place_id FK → place, user_id FK → app_user,
+       rating TINYINT CHECK (rating BETWEEN 1 AND 5), comment TEXT NULL,
+       visit_date DATE NULL, party_type VARCHAR(16) NULL,
+       status ENUM('published','hidden','deleted'), report_count INT,
+       created_at, updated_at,
+       UNIQUE (place_id, user_id))          -- mỗi người một đánh giá / địa điểm, sửa được
+review_photo(photo_id PK, review_id FK, object_key, thumb_key,
+             width, height, bytes, status, created_at)
+place_rating_summary(place_id PK, n_reviews, mean_rating, bayes_rating, updated_at)
+```
+
+**API**
+
+| Phương thức | Đường dẫn | Ghi chú |
+|---|---|---|
+| GET | `/api/places/{id}/reviews?page=` | Công khai; chỉ `published` |
+| POST | `/api/places/{id}/reviews` | Cần đăng nhập; tạo hoặc cập nhật đánh giá của chính mình |
+| POST | `/api/reviews/{id}/photos` | multipart; tối đa 5 ảnh/đánh giá, 5 MB/ảnh, jpeg/png/webp |
+| DELETE | `/api/reviews/{id}` | Chủ đánh giá hoặc admin |
+| POST | `/api/reviews/{id}/report` | Báo cáo vi phạm |
+
+**Dùng đánh giá trong xếp hạng**
+
+- Hiển thị: điểm trung bình + số lượt; địa điểm chưa có đánh giá hiển thị “chưa có đánh giá”, không hiển thị 0 sao.
+- Xếp hạng: dùng **trung bình Bayes** để tránh địa điểm 1 lượt 5 sao vượt địa điểm 50 lượt 4,6 sao:
+  `bayes = (C·m + Σ rating) / (C + n)`, với `m` = trung bình toàn hệ thống, `C` = 5 (hiệu chỉnh khi có dữ liệu).
+- Tiêu chí “đánh giá” trong WSM **mặc định tắt** cho tới khi đủ dữ liệu (ví dụ ≥ 30% địa điểm tầng 1 có ≥ 5 lượt); khi bật, so sánh có/không có tiêu chí này trong thực nghiệm. Thiếu đánh giá không bị trừ điểm (nguyên tắc 3).
+- Explanation chỉ được nhắc đánh giá khi `n ≥ 5`, và phải ghi số lượt (“4,5/5 từ 12 lượt”).
+
+**Riêng tư và kiểm duyệt**
+
+- Xoá toàn bộ EXIF (vị trí GPS, thiết bị) trước khi lưu; không lưu ảnh gốc chưa xử lý.
+- Khi tải ảnh, người dùng xác nhận là tác giả và đồng ý cho hệ thống hiển thị ảnh.
+- Giới hạn tần suất (ví dụ 10 đánh giá/ngày/tài khoản); tài khoản mới chưa xác minh email không đăng được ảnh.
+- Người dùng xoá tài khoản → xoá đánh giá và ảnh của họ.
+- Không dùng nội dung nhận xét làm đầu vào cho Claude trong luồng lập lịch ở Core (tránh prompt injection từ nội dung người dùng); nếu sau này dùng để tóm tắt nhận xét thì coi đó là dữ liệu, không phải chỉ dẫn.
 
 ---
 
@@ -560,7 +642,7 @@ Chưa có kết quả; số liệu báo cáo sau thực nghiệm trên bộ yêu
 | 9–10 | Itinerary Planning hoàn chỉnh (2-opt, ngân sách năng lượng) + Feasibility + vòng sửa; nối LangGraph đầy đủ có checkpoint |
 | 11 | Clarification, Explanation (kiểm tra evidence), nhánh sửa lịch theo checkpoint |
 | 12 | Ghi âm trên web + pipeline STT + chuẩn hóa + hiệu chỉnh tên (module cắm thêm, chỉ nối vào đầu vào văn bản) |
-| 13 | Frontend hoàn chỉnh (bản đồ, lịch, micro) |
+| 13 | Frontend hoàn chỉnh (bản đồ, lịch, micro, thẻ địa điểm); đăng nhập, đánh giá + tải ảnh (mục 9.2) |
 | 14–15 | Thực nghiệm so sánh, đo đạc, khảo sát người dùng |
 | 16 | Viết báo cáo; Advanced nếu còn thời gian |
 
@@ -590,6 +672,8 @@ Chưa có kết quả; số liệu báo cáo sau thực nghiệm trên bộ yêu
 | Chi phí / độ trễ Claude | Trải nghiệm chậm, tốn | Cache, giới hạn token, chỉ gọi ở bước ngôn ngữ |
 | Tài nguyên tính toán STT | Chậm nếu không có GPU | Mô hình nhỏ + lượng tử hóa; xử lý nền |
 | Riêng tư ghi âm | Rủi ro pháp lý, đạo đức | Xóa sau chép lời; xin đồng ý khi thu tập đánh giá |
+| Ít đánh giá lúc đầu (cold start) | Điểm đánh giá không có ý nghĩa | Trung bình Bayes; tiêu chí đánh giá tắt trong WSM tới khi đủ dữ liệu; nhóm người dùng thử đánh giá trước |
+| Nội dung người dùng xấu (spam, ảnh không phù hợp, lộ vị trí) | Uy tín, riêng tư | Đăng nhập, giới hạn tần suất, báo cáo + admin ẩn, xoá EXIF |
 
 ### Việc cần chốt
 
@@ -619,7 +703,12 @@ Chưa có kết quả; số liệu báo cáo sau thực nghiệm trên bộ yêu
 │   ├── raw/                    # dữ liệu gốc (không commit file lớn)
 │   ├── processed/
 │   └── eval/                   # yêu cầu mẫu có nhãn, ghi âm mẫu
-├── pipelines/                  # thu thập, làm sạch, nạp DB, sinh embedding
+├── pipelines/                  # package itinerary_pipelines: mỗi bước một module, gọi riêng được (mục 8.1)
+│   ├── itinerary_pipelines/
+│   │   ├── osm/                # fetch, coverage
+│   │   ├── clean/              # taxonomy, chuẩn hoá, gộp trùng
+│   │   └── load/               # nạp MySQL
+│   └── tests/
 ├── backend/
 │   ├── app/
 │   │   ├── api/                # FastAPI routes: /plan, /voice, /itinerary

@@ -1,0 +1,11 @@
+﻿place_id,flags,name,category,osm_url
+osm:w196896036,same_name_other_category_nearby,Chùa Long Sơn,religious,https://www.openstreetmap.org/way/196896036
+osm:n4673841090,name_suggests_service:station;museum_name_mismatch,GAS station,museum,https://www.openstreetmap.org/node/4673841090
+osm:n4884705621,museum_name_mismatch;same_name_other_category_nearby,Hòn Chồng,museum,https://www.openstreetmap.org/node/4884705621
+osm:w207742943,generic_name,Nha Trang,beach,https://www.openstreetmap.org/way/207742943
+osm:w196896058,name_suggests_service:showroom;museum_name_mismatch,Showroom,museum,https://www.openstreetmap.org/way/196896058
+osm:n12813515691,name_suggests_service:motobikes;museum_name_mismatch,Some Motobikes,museum,https://www.openstreetmap.org/node/12813515691
+osm:n1631244604,likely_service_business:dive,Scuba Dive dive center,entertainment,https://www.openstreetmap.org/node/1631244604
+osm:n1631209371,likely_service_business:dive,Angel Dive,entertainment,https://www.openstreetmap.org/node/1631209371
+osm:n1629522443,likely_service_business:dive,Coco Dive centre,entertainment,https://www.openstreetmap.org/node/1629522443
+osm:n1631209374,likely_service_business:dive,Turtle Dive,entertainment,https://www.openstreetmap.org/node/1631209374
